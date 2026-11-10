@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# TU Delft eduVPN from dmenu: "tudelft-vpn" connects, or disconnects when already connected.
+# "tudelft-vpn on" and "tudelft-vpn off" only connect or only disconnect.
+# Shows a notification while connecting and once connected (or failed). When the
+# login has expired, eduVPN opens the TU Delft login page in the browser first.
+# dwm-status shows "eduVPN..." while connecting and "eduVPN" once connected.
+
+ID=9910       # one notification that updates in place, with dunstify
+TIMEOUT=90    # seconds to wait for the tunnel to come up
+
+notify() {
+    if command -v dunstify >/dev/null 2>&1; then
+        dunstify -r "$ID" "$@"
+    else
+        notify-send "$@"
+    fi
+}
+
+state() {
+    nmcli -t -f NAME,TYPE,STATE connection show --active 2>/dev/null | awk -F: '$1 == "eduVPN" && $2 == "vpn" {print $3}'
+}
+
+# eduvpn-cli prints debug lines on every run, keep only the useful ones
+run() {
+    local out
+    if ! out=$(eduvpn-cli -y "$@" 2>&1); then
+        notify -u critical "eduVPN $1 failed" "$(grep -v 'level=DEBUG' <<< "$out" | tail -n 3)"
+        return 1
+    fi
+}
+
+action="$1"
+if [ -z "$action" ]; then
+    [ "$(state)" = activated ] && action=off || action=on
+fi
+
+case "$action" in
+    on | connect)
+        if [ "$(state)" = activated ]; then
+            notify -t 3000 "eduVPN" "Already connected"
+            exit 0
+        fi
+        notify -t 0 "eduVPN" "Connecting..."
+        run connect -n 1 || exit 1
+        for _ in $(seq "$TIMEOUT"); do
+            [ "$(state)" = activated ] && { notify -t 4000 "eduVPN" "Connected"; exit 0; }
+            sleep 1
+        done
+        notify -u critical "eduVPN" "Not connected after ${TIMEOUT}s, try again or open eduvpn-gui"
+        exit 1
+        ;;
+    off | disconnect)
+        [ -z "$(state)" ] && exit 0
+        run disconnect && notify -t 3000 "eduVPN" "Disconnected"
+        ;;
+    *)
+        notify -u critical "tudelft-vpn" "Unknown option \"$1\", use tudelft-vpn, tudelft-vpn on or tudelft-vpn off"
+        exit 1
+        ;;
+esac

@@ -1,0 +1,92 @@
+#!/bin/sh
+# Split tunnel for TU Delft eduVPN.
+#
+# The TU Delft server tells the eduVPN client to send all traffic through the
+# VPN. This NetworkManager dispatcher script runs when the "eduVPN" connection
+# comes up and adds policy routing rules so that only TU Delft networks use the
+# tunnel; everything else (IPv4, IPv6 and the home LAN) keeps using the normal
+# connection and its DNS.
+# The eduVPN app itself is left untouched.
+
+ACTION="$2"
+TABLE=4711
+TU_NETS="131.180.0.0/16 130.161.0.0/16 145.94.0.0/16"   # TU Delft (AS1128)
+PREF_TU=31000
+PREF_DIRECT=31020
+RESOLV=/etc/resolv.conf
+
+split_active() {
+    ip -4 rule show pref "$PREF_DIRECT" | grep -q "lookup $TABLE"
+}
+
+clear_rules() {
+    for net in $TU_NETS; do
+        ip -4 rule del pref "$PREF_TU" to "$net" lookup main 2>/dev/null
+    done
+    for fam in -4 -6; do
+        ip "$fam" rule del pref "$PREF_DIRECT" 2>/dev/null
+        ip "$fam" route flush table "$TABLE" 2>/dev/null
+    done
+}
+
+# Copy every route that doesn't use the VPN into our own table. The VPN pushes
+# more than a default route (IPv6 ::/3, 2000::/4, parts of the home LAN), so
+# only the non-VPN routes are trusted for normal traffic.
+fill_table() {
+    vpn_if="$1"
+    for fam in -4 -6; do
+        ip "$fam" route flush table "$TABLE" 2>/dev/null
+        ip "$fam" route show table main | grep -v " dev $vpn_if" \
+            | sed -e 's/ linkdown//' -e 's/ expires \([0-9]*\)sec/ expires \1/' \
+            | while read -r route; do
+                # shellcheck disable=SC2086
+                ip "$fam" route add $route table "$TABLE" 2>/dev/null
+            done
+    done
+    # Without a normal IPv6 route, block IPv6 instead of leaking it into the
+    # tunnel; browsers then fall back to IPv4.
+    ip -6 route add unreachable default metric 4294967295 table "$TABLE" 2>/dev/null
+}
+
+# Use the DNS servers of the normal connection, so TU Delft doesn't see lookups.
+write_dns() {
+    dev=$(ip -4 route show table "$TABLE" default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')
+    [ -n "$dev" ] || return
+    servers=$(nmcli -g IP4.DNS,IP6.DNS device show "$dev" | tr '|' '\n' | tr -d ' ' | grep -v '^$')
+    [ -n "$servers" ] || return
+    {
+        echo "# Written by 50-eduvpn-split: eduVPN is up, only TU Delft traffic uses the tunnel"
+        for s in $servers; do echo "nameserver $s"; done
+    } > "$RESOLV.split" && mv "$RESOLV.split" "$RESOLV"
+}
+
+case "$ACTION" in
+    vpn-up)
+        [ "$CONNECTION_ID" = "eduVPN" ] || exit 0
+        clear_rules
+        fill_table "${VPN_IP_IFACE:-tun0}"
+        for net in $TU_NETS; do
+            ip -4 rule add pref "$PREF_TU" to "$net" lookup main
+        done
+        for fam in -4 -6; do
+            ip "$fam" rule add pref "$PREF_DIRECT" lookup "$TABLE"
+        done
+        write_dns
+        logger -t eduvpn-split "split tunnel on for $TU_NETS"
+        ;;
+    vpn-down)
+        [ "$CONNECTION_ID" = "eduVPN" ] || exit 0
+        clear_rules
+        logger -t eduvpn-split "split tunnel off"
+        ;;
+    up | dhcp4-change | dhcp6-change | dns-change)
+        # NetworkManager may rewrite resolv.conf or the normal routes while the
+        # VPN is up; put ours back.
+        if split_active; then
+            vpn_if=$(ip -4 route show default | awk '$0 ~ / dev tun/ {for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')
+            fill_table "${vpn_if:-tun0}"
+            write_dns
+        fi
+        ;;
+esac
+exit 0

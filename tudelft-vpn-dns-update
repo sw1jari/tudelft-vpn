@@ -1,0 +1,55 @@
+#!/bin/sh
+# Keeps the local DNS forwarder (tudelft-vpn-dns.service) in sync with NetworkManager.
+#
+# upstream.conf  DNS servers of the normal, non-VPN connection; used for everything
+# vpn.conf       the VPN's DNS servers, only for the domains the VPN pushes (tudelft.net)
+#
+# Run by 50-eduvpn-split on network changes and by the service before it starts.
+# With --no-reload it only writes the files.
+
+DIR=/run/tudelft-vpn-dns
+TABLE=4711
+mkdir -p "$DIR"
+
+first_dev() {
+    awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}'
+}
+
+dns_of() {
+    nmcli -g IP4.DNS,IP6.DNS device show "$1" 2>/dev/null | tr '|' '\n' | tr -d ' ' |
+        grep -v '^$' | grep -vi '^fe80:'
+}
+
+# The normal connection is the default route that isn't a tunnel. While the
+# split tunnel is on, table 4711 holds exactly that route.
+normal=$(ip -4 route show default | grep -vE ' dev (tun|wg)' | first_dev)
+[ -n "$normal" ] || normal=$(ip -4 route show table "$TABLE" default 2>/dev/null | first_dev)
+
+servers=""
+[ -n "$normal" ] && servers=$(dns_of "$normal")
+# No normal connection yet: keep the old list instead of leaving DNS empty
+if [ -n "$servers" ]; then
+    for s in $servers; do echo "nameserver $s"; done > "$DIR/upstream.conf.new"
+    mv "$DIR/upstream.conf.new" "$DIR/upstream.conf"
+fi
+[ -f "$DIR/upstream.conf" ] || : > "$DIR/upstream.conf"
+
+# Internal names the VPN's DNS servers know about, e.g. tudelft.net for the
+# network drives. Only these lookups go to the VPN's DNS.
+for dev in $(ip -o link show | awk -F': ' '{print $2}' | grep -E '^tun'); do
+    domains=$(nmcli -g IP4.DOMAIN,IP6.DOMAIN device show "$dev" 2>/dev/null | tr '|' '\n' | tr -d ' ' | grep -v '^$' | sort -u)
+    vpndns=$(dns_of "$dev")
+    for d in $domains; do
+        for s in $vpndns; do echo "server=/$d/$s"; done
+    done
+done > "$DIR/vpn.conf.new"
+
+if cmp -s "$DIR/vpn.conf.new" "$DIR/vpn.conf"; then
+    rm -f "$DIR/vpn.conf.new"
+else
+    mv "$DIR/vpn.conf.new" "$DIR/vpn.conf"
+    # dnsmasq rereads upstream.conf by itself, but vpn.conf only on SIGHUP
+    [ "$1" = "--no-reload" ] || systemctl reload tudelft-vpn-dns.service 2>/dev/null
+fi
+chmod 644 "$DIR"/*.conf
+exit 0

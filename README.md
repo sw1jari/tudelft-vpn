@@ -2,12 +2,13 @@
 
 TU Delft eduVPN on Linux, with only TU Delft traffic going through the VPN.
 
-TU Delft's eduVPN profile sends all traffic through the university, including personal browsing and DNS lookups. This repo has two parts:
+TU Delft's eduVPN profile sends all traffic through the university, including personal browsing and DNS lookups. This repo has three parts:
 
 | File | What it does |
 |---|---|
 | [`50-eduvpn-split`](50-eduvpn-split) | NetworkManager dispatcher script. When eduVPN connects, only TU Delft networks go through the tunnel; everything else uses your normal connection and its DNS |
 | [`tudelft-vpn`](tudelft-vpn) | Command to connect or disconnect, with notifications. Handy from dmenu |
+| [`install-dns.sh`](install-dns.sh) | Optional split DNS, so internal TU Delft names under `tudelft.net` resolve while everything else keeps using your normal DNS |
 
 ## Split tunnel
 
@@ -27,7 +28,7 @@ How it works: the server pushes more than a default route (also `::/3`, `2000::/
 
 Things that change compared to the full tunnel:
 - Sites that recognise TU Delft by IP address, like journal publishers, no longer see you as on campus. Use "access through your institution" and log in with your NetID instead.
-- Hostnames that only resolve inside the TU Delft network won't resolve. GitLab, DAIC and Mattermost resolve publicly and work.
+- Hostnames that only resolve inside the TU Delft network, like `tudelft.net`, won't resolve unless you also install [split DNS](#split-dns). GitLab, DAIC and Mattermost resolve publicly and work either way.
 
 Install:
 
@@ -44,6 +45,37 @@ curl -4 ifconfig.me        # your normal public IP
 ```
 
 Uninstall by removing the file and reconnecting.
+
+## Split DNS
+
+Optional. With only the split tunnel, every lookup goes to your normal DNS, so TU Delft's internal names under `tudelft.net` don't resolve. Split DNS fixes that without sending the rest of your lookups to TU Delft:
+
+| Lookup | Goes to |
+|---|---|
+| Domains the VPN pushes (`tudelft.net`) | TU Delft's DNS, only while eduVPN is up |
+| Everything else | Your normal connection's DNS |
+
+A small dnsmasq runs on `127.0.0.1:53` and `/etc/resolv.conf` points at it. The split script keeps its server lists in `/run/tudelft-vpn-dns/` up to date whenever the network changes, and NetworkManager stops writing `resolv.conf` itself. The domains and servers come from what the VPN pushes, so nothing TU Delft specific is hardcoded.
+
+Install (needs `dnsmasq`):
+
+```sh
+sudo ./install-dns.sh
+```
+
+Check that it works with eduVPN on:
+
+```sh
+getent hosts tudelft.net             # 131.180.x.x
+journalctl -u tudelft-vpn-dns -n 20  # which servers it uses
+cat /run/tudelft-vpn-dns/*.conf
+```
+
+Uninstall with `sudo ./install-dns.sh --uninstall`.
+
+The network drives at `smb://tudelft.net/...` still won't mount with the student profile, even with split DNS: the SMB port (445) is blocked over eduVPN. Use the same drives over WebDAV at `https://webdata.tudelft.nl/` instead, for example with an rclone `webdav` remote.
+
+If you use [focus](https://github.com/sw1jari/focus), its DNS redirect still takes over during focus time, so `tudelft.net` only resolves then if it's on the focus allowlist.
 
 ## tudelft-vpn
 
@@ -67,7 +99,7 @@ cp tudelft-vpn ~/.local/bin/
 
 ## Requirements
 
-NetworkManager with the eduVPN Linux client (`eduvpn-gui` and `eduvpn-cli`), iproute2, and dunst or libnotify for notifications. Tested with the OpenVPN profile TU Delft's "Studenten" profile uses; eduVPN's WireGuard setup puts its routes in a separate table, which the split script doesn't handle.
+NetworkManager with the eduVPN Linux client (`eduvpn-gui` and `eduvpn-cli`), iproute2, dnsmasq for split DNS, and dunst or libnotify for notifications. Tested with the OpenVPN profile TU Delft's "Studenten" profile uses; eduVPN's WireGuard setup puts its routes in a separate table, which the split script doesn't handle.
 
 ## License
 

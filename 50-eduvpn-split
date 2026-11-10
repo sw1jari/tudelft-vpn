@@ -25,6 +25,7 @@ clear_rules() {
     done
     for fam in -4 -6; do
         ip "$fam" rule del pref "$PREF_DIRECT" 2>/dev/null
+        ip "$fam" rule del pref 31010 2>/dev/null   # left over from the first version
         ip "$fam" route flush table "$TABLE" 2>/dev/null
     done
 }
@@ -49,6 +50,17 @@ fill_table() {
 }
 
 # Use the DNS servers of the normal connection, so TU Delft doesn't see lookups.
+# With tudelft-vpn-dns installed, a local forwarder does this and also sends
+# tudelft.net lookups to TU Delft's DNS; otherwise write resolv.conf directly.
+DNS_UPDATE=/usr/local/bin/tudelft-vpn-dns-update
+update_dns() {
+    if [ -x "$DNS_UPDATE" ]; then
+        "$DNS_UPDATE"
+    elif split_active; then
+        write_dns
+    fi
+}
+
 write_dns() {
     dev=$(ip -4 route show table "$TABLE" default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')
     [ -n "$dev" ] || return
@@ -71,22 +83,23 @@ case "$ACTION" in
         for fam in -4 -6; do
             ip "$fam" rule add pref "$PREF_DIRECT" lookup "$TABLE"
         done
-        write_dns
+        update_dns
         logger -t eduvpn-split "split tunnel on for $TU_NETS"
         ;;
     vpn-down)
         [ "$CONNECTION_ID" = "eduVPN" ] || exit 0
         clear_rules
+        update_dns
         logger -t eduvpn-split "split tunnel off"
         ;;
-    up | dhcp4-change | dhcp6-change | dns-change)
+    up | down | dhcp4-change | dhcp6-change | dns-change)
         # NetworkManager may rewrite resolv.conf or the normal routes while the
         # VPN is up; put ours back.
         if split_active; then
             vpn_if=$(ip -4 route show default | awk '$0 ~ / dev tun/ {for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')
             fill_table "${vpn_if:-tun0}"
-            write_dns
         fi
+        update_dns
         ;;
 esac
 exit 0

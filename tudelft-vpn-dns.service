@@ -1,0 +1,16 @@
+[Unit]
+Description=Split DNS for eduVPN (tudelft.net through the VPN, the rest through the normal connection)
+Before=nss-lookup.target
+Wants=nss-lookup.target
+After=network-pre.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/local/bin/tudelft-vpn-dns-update --no-reload
+ExecStart=/usr/bin/dnsmasq --keep-in-foreground --conf-file=/etc/tudelft-vpn-dns.conf --pid-file=
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

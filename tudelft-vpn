@@ -6,7 +6,7 @@
 # dwm-status shows "eduVPN..." while connecting and "eduVPN" once connected.
 
 ID=9910       # one notification that updates in place, with dunstify
-TIMEOUT=90    # seconds to wait for the tunnel to come up
+TIMEOUT=240   # seconds to wait for the tunnel, includes time to log in in the browser
 
 notify() {
     if command -v dunstify >/dev/null 2>&1; then
@@ -41,12 +41,34 @@ case "$action" in
             exit 0
         fi
         notify -t 0 "eduVPN" "Connecting..."
-        run connect -n 1 || exit 1
+        log=$(mktemp)
+        # eduvpn-cli opens the browser through python webbrowser, which is unreliable
+        # outside a terminal session. Disable that (BROWSER=true) and open the login
+        # URL ourselves once eduvpn-cli prints it.
+        PYTHONUNBUFFERED=1 BROWSER=true eduvpn-cli -y connect -n 1 > "$log" 2>&1 &
+        pid=$!
+        opened=
         for _ in $(seq "$TIMEOUT"); do
-            [ "$(state)" = activated ] && { notify -t 4000 "eduVPN" "Connected"; exit 0; }
+            [ "$(state)" = activated ] && { notify -t 4000 "eduVPN" "Connected"; rm -f "$log"; exit 0; }
+            if [ -z "$opened" ]; then
+                url=$(grep -v 'level=DEBUG' "$log" | grep -o 'url: https\?://[^ ]*' | head -n 1 | cut -d' ' -f2)
+                if [ -n "$url" ]; then
+                    opened=1
+                    notify -t 0 "eduVPN" "Log in in the browser..."
+                    setsid -f xdg-open "$url" >/dev/null 2>&1
+                fi
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+                [ "$(state)" = activated ] && continue
+                notify -u critical "eduVPN connect failed" "$(grep -v 'level=DEBUG' "$log" | tail -n 3)"
+                rm -f "$log"
+                exit 1
+            fi
             sleep 1
         done
+        kill "$pid" 2>/dev/null
         notify -u critical "eduVPN" "Not connected after ${TIMEOUT}s, try again or open eduvpn-gui"
+        rm -f "$log"
         exit 1
         ;;
     off | disconnect)
